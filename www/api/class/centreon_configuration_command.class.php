@@ -1,7 +1,8 @@
 <?php
+
 /*
- * Copyright 2005-2015 Centreon
- * Centreon is developped by : Julien Mathis and Romain Le Merlus under
+ * Copyright 2005-2020 Centreon
+ * Centreon is developed by : Julien Mathis and Romain Le Merlus under
  * GPL Licence 2.0.
  *
  * This program is free software; you can redistribute it and/or modify it under
@@ -13,7 +14,7 @@
  * PARTICULAR PURPOSE. See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; if not, see <htcommand://www.gnu.org/licenses>.
+ * this program; if not, see <http://www.gnu.org/licenses>.
  *
  * Linking this program statically or dynamically with other modules is making a
  * combined work based on this program. Thus, the terms and conditions of the GNU
@@ -34,9 +35,12 @@
  */
 
 
-require_once _CENTREON_PATH_ . "/www/class/centreonDB.class.php";
-require_once dirname(__FILE__) . "/centreon_configuration_objects.class.php";
+require_once _CENTREON_PATH_ . '/www/class/centreonDB.class.php';
+require_once __DIR__ . '/centreon_configuration_objects.class.php';
 
+/*
+ * Methods called to get the commands linked to an host
+ */
 class CentreonConfigurationCommand extends CentreonConfigurationObjects
 {
     /**
@@ -88,6 +92,18 @@ class CentreonConfigurationCommand extends CentreonConfigurationObjects
             $queryValues['limit'] = (int)$this->arguments['page_limit'];
         }
 
+        $toto = $this->isAllowed();
+        $centreonLog = new CentreonLog();
+        $centreonLog->insertLog(
+            2,
+            (string)$toto
+        );
+        echo "<PRE>";
+        print_r($queryCommand);
+
+        var_dump($toto);
+        echo "</PRE>";
+
         $stmt = $this->pearDB->prepare($queryCommand);
         $stmt->bindParam(':commandName', $queryValues["commandName"], PDO::PARAM_STR);
         if (isset($queryValues['commandType'])) {
@@ -108,5 +124,93 @@ class CentreonConfigurationCommand extends CentreonConfigurationObjects
             'items' => $commandList,
             'total' => (int)$this->pearDB->numberRows()
         );
+    }
+
+
+    /**
+     * check host limitation
+     *
+     * @return bool
+     * @throws \Exception
+     */
+    private function isAllowed(): bool
+    {
+        $dbResult = $this->pearDB->query(
+            'SELECT `name` FROM modules_informations
+            WHERE `name` = "centreon-license-manager"'
+        );
+        if (!$dbResult->fetch()) {
+            return false;
+        }
+        try {
+            $container = \Centreon\LegacyContainer::getInstance();
+        } catch (Exception $e) {
+            throw new Exception('Cannot instantiate container');
+        }
+
+        $container[\CentreonLicense\ServiceProvider::LM_PRODUCT_NAME] = 'epp';
+        $container[\CentreonLicense\ServiceProvider::LM_HOST_CHECK] = true;
+
+        if (!$container[\CentreonLicense\ServiceProvider::LM_LICENSE]) {
+            return false;
+        }
+
+        $licenceManager = $container[\CentreonLicense\ServiceProvider::LM_LICENSE];
+        if (!$licenceManager->validate()) {
+            return false;
+        }
+        $licenseData = ((int)$licenceManager->getData()['licensing']['hosts']) ?? 0;
+        $num = $this->getHostNumber();
+
+        return ($licenseData === -1 || $licenseData > $num);
+    }
+
+    /**
+     *  get number of hosts
+     *
+     * @return int
+     */
+    private function getHostNumber(): int
+    {
+        $query = $this->pearDB->query('SELECT COUNT(*) AS `num` FROM host WHERE host_register <> "0"');
+        return ((int)$query->fetch()['num']);
+    }
+
+    /**
+     *  get list of inherited templates from plugin pack
+     *
+     * @return array
+     * @throws Exception
+     */
+    private function getLimitedList(): array
+    {
+        $freePp = array(
+            'applications-databases-mysql',
+            'applications-monitoring-centreon-central',
+            'applications-monitoring-centreon-database',
+            'applications-monitoring-centreon-poller',
+            'base-generic',
+            'hardware-printers-standard-rfc3805-snmp',
+            'hardware-ups-standard-rfc1628-snmp',
+            'network-cisco-standard-snmp',
+            'operatingsystems-linux-snmp',
+            'operatingsystems-windows-snmp'
+        );
+        $ppList = array();
+        $dbResult = $this->db->query('SELECT `name` FROM modules_informations WHERE `name` = "centreon-pp-manager"');
+        if (!$dbResult->fetch() || true === $this->isAllowed()) {
+            return $ppList;
+        }
+        $dbResult = $this->db->query(
+            'SELECT ph.host_id
+            FROM mod_ppm_pluginpack_host ph, mod_ppm_pluginpack pp
+            WHERE ph.pluginpack_id = pp.pluginpack_id
+            AND pp.slug NOT IN ("' . implode('","', $freePp) . '")'
+        );
+        while ($row = $dbResult->fetch()) {
+            $this->getHostChain($row['host_id'], $ppList);
+        }
+        asort($ppList);
+        return $ppList;
     }
 }
